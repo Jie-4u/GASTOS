@@ -2,7 +2,23 @@ const app = document.getElementById('app');
 const S = { view: 'welcome', me: null, stack: [], k: 'expense' };
 const peso = n => '₱' + Number(n).toLocaleString('en-PH', { maximumFractionDigits: 2 });
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const today = () => new Date().toISOString().slice(0, 10);
+// const today = () => new Date().toISOString().slice(0, 10);
+const MANILA_DATE = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'Asia/Manila',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit'
+});
+
+const manilaDate = (d = new Date()) => {
+  const p = MANILA_DATE.formatRangeToParts(d);
+  const get = type => p.find(x => x.type === type).value;
+
+  return `${get('year')}-${get('month')}-${get('day')}`;
+};
+
+const today = () => manilaDate();
+
 function toast(m) { const t = document.getElementById('toast'); t.textContent = m; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2800); }
 async function api(p, m = 'GET', b) {
   const r = await fetch('/api/' + p, { method: m, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (localStorage.t || '') }, body: b ? JSON.stringify(b) : undefined });
@@ -12,7 +28,13 @@ async function api(p, m = 'GET', b) {
   if (!r.ok) throw new Error(d.error || 'Something went wrong');
   return d;
 }
-const lbl = d => { const t = today(), y = new Date(Date.now() - 864e5).toISOString().slice(0, 10); return d === t ? 'Today' : d === y ? 'Yesterday' : d; };
+//const lbl = d => { const t = today(), y = new Date(Date.now() - 864e5).toISOString().slice(0, 10); return d === t ? 'Today' : d === y ? 'Yesterday' : d; };
+const lbl = d => {
+  const t = today(),
+  y = manilaDate(new Date(Date.now() - 864e5));
+  return d === t ? 'Today' : d === y ? 'Yesterday' : d;
+};
+
 const bar = p => `<div class="bar"><i style="width:${Math.min(100, p)}%"></i></div>`;
 const row = (a, b) => `<div class="row"><span>${a}</span><span>${b}</span></div>`;
 

@@ -155,6 +155,8 @@ class Budget(db.Model):
     category = db.Column(db.String(60), nullable=False)
     monthly_limit = db.Column(db.Float, nullable=False)
 
+def invitation_digest(inv):
+    return hashlib.sha256(f"{inv.id}:{inv.token_nonce}".encode()).hexdigest()
 
 with app.app_context():
     db.create_all()

@@ -45,7 +45,9 @@ if not secret and os.environ.get("APP_ENV") == "production":
 secret = secret or "local-development-only-change-me"
 url = os.environ.get("DATABASE_URL", "sqlite:///gastos.db")
 if url.startswith("postgres://"):
-    url = url.replace("postgres://", "postgresql://", 1)
+    url = url.replace("postgres://", "postgresql+psycopg2://", 1)
+elif url.startswith("postgresql://"):
+    url = url.replace("postgresql://", "postgresql+psycopg2://", 1)
 def configured_app_base_url():
     return os.environ.get("APP_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
 

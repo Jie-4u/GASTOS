@@ -6,3 +6,5 @@ instance/
 .env
 .vercel/
 gastos.db
+.vercel
+.env*

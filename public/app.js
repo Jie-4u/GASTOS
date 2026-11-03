@@ -11,7 +11,7 @@ const MANILA_DATE = new Intl.DateTimeFormat('en-US', {
 });
 
 const manilaDate = (d = new Date()) => {
-  const p = MANILA_DATE.formatRangeToParts(d);
+  const p = MANILA_DATE.formatToParts(d);
   const get = type => p.find(x => x.type === type).value;
 
   return `${get('year')}-${get('month')}-${get('day')}`;

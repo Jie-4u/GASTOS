@@ -46,10 +46,15 @@ secret = secret or "local-development-only-change-me"
 url = os.environ.get("DATABASE_URL", "sqlite:///gastos.db")
 if url.startswith("postgres://"):
     url = url.replace("postgres://", "postgresql://", 1)
+def configured_app_base_url():
+    return os.environ.get("APP_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+
+
 if os.environ.get("APP_ENV") == "production":
-    if not os.environ.get("APP_BASE_URL"):
-        raise RuntimeError("APP_BASE_URL must be configured in production")
-    public_url = urlsplit(os.environ["APP_BASE_URL"])
+    configured_base = configured_app_base_url()
+    if not configured_base:
+        raise RuntimeError("APP_BASE_URL or the hosting platform's public HTTPS URL must be configured in production")
+    public_url = urlsplit(configured_base)
     if public_url.scheme != "https" or not public_url.netloc or public_url.username or public_url.password:
         raise RuntimeError("APP_BASE_URL must be a public HTTPS origin in production")
     if public_url.path not in ("", "/") or public_url.query or public_url.fragment:
@@ -256,7 +261,7 @@ def token(u):
 
 
 def public_app_link(params):
-    base = os.environ.get("APP_BASE_URL")
+    base = configured_app_base_url()
     if not base:
         raise RuntimeError("APP_BASE_URL must be configured before sending invitations")
     parts = urlsplit(base)

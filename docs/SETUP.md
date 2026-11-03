@@ -41,15 +41,16 @@ The app generates links at `APP_BASE_URL/?invite=...`. Localhost links only work
 
 ## Deploy on Render (recommended starting path)
 
-This repository includes `render.yaml` and a `Procfile` for a production Gunicorn web service. Render hosts the Python app; PostgreSQL stores accounts, invitations, and finances; Brevo sends the email. The database and web service are separate resources. Use a paid/persistent production database and check the provider's current prices and backup/retention terms before creating it. Do not use the app's default SQLite database for deployment: local instance files may be ephemeral and are not shared across instances.
+This repository includes a Render Blueprint that creates the Python web app and a PostgreSQL database in Singapore. Render hosts the app and database; Brevo sends email. The Blueprint links the web service to the database automatically and Render's assigned HTTPS URL is used for invitations unless `APP_BASE_URL` is explicitly set (for a custom domain, for example). The included plans are the smallest paid always-on app and PostgreSQL plans; review Render's current costs before syncing the Blueprint. Free PostgreSQL expires after 30 days and should only be used for a throwaway demo. Do not use the app's default SQLite database for deployment: service files may be ephemeral and are not shared across instances.
 
 1. Push this project to a private GitHub repository. Confirm `.env` is ignored and do not commit secrets.
-2. In Render, create a PostgreSQL database. Copy its **internal** connection string for a service in the same Render region.
-3. In Render, create a Blueprint from the repository and review the resources before applying. The Blueprint defines the Gastos web service and prompts for `APP_BASE_URL`, `DATABASE_URL`, and Brevo credentials. If you create the web service first, its `onrender.com` URL appears in the dashboard; set that exact HTTPS origin as `APP_BASE_URL` and set `DATABASE_URL` to the PostgreSQL internal connection string.
-4. Set `SMTP_USERNAME` to the SMTP login from Brevo, `SMTP_PASSWORD` to the SMTP key, and `SMTP_FROM` to a verified sender address on a domain you control. Keep SMTP port 587. Do not use a Brevo API key or account password as the SMTP password.
-5. Deploy, then open `https://<your-app-host>/health`. It should return `{"status":"ok"}`. Confirm the app's public URL is the same value configured in `APP_BASE_URL`.
-6. Sign in as the family owner and create an invitation for an email account you can access. Confirm the delivery status is **sent**, the email arrives, and its button opens the deployed app. Sign in or register using the exact invited email to accept it.
-7. Test **Resend** and **Cancel invitation**. Resend rotates the token, so an earlier link must stop working. If the public app URL changes, update `APP_BASE_URL`, redeploy/restart, then resend each still-needed invitation.
+2. In Render, connect the repository and create a Blueprint from `render.yaml`. Review the displayed web-service and database plans and monthly estimate before applying; this Blueprint provisions both resources.
+3. Enter Brevo's SMTP login, SMTP key, and verified sender address in the Render secret fields. Enter PayMongo credentials and plan IDs only if you intend to enable the payment flow there. Do not copy credentials into this repository or use a Brevo API key as its SMTP password.
+4. After deployment, open `https://<your-app-host>/health`; it should return `{"status":"ok"}`. The web service uses its assigned HTTPS URL for invite links. If adding a custom domain, set `APP_BASE_URL` to that HTTPS origin.
+5. Create an invitation for an email account you can access. Confirm the delivery status is **sent**, check the mailbox, and verify the button opens the deployed app. Sign in or register using the exact invited email to accept it.
+6. Test **Resend** and **Cancel invitation**. Resend rotates the token, so an earlier link stops working.
+
+The Blueprint creates a **new, empty** production database; it does not copy local SQLite records. Migrating existing family accounts, profile photos, and financial records uploads that data to Render and should be planned and authorized separately. Do not use the production instance for invented or test financial records.
 
 Render's Flask guide uses Gunicorn for production and its Blueprint supports health checks and secret environment variables. See [Deploy a Flask App on Render](https://render.com/docs/deploy-flask), [Blueprint specification](https://render.com/docs/blueprint-spec), and [Render environment variables](https://render.com/docs/configure-environment-variables).
 
@@ -59,7 +60,7 @@ Other suitable options are Railway, Fly.io, or a VPS. Each needs a persistent Po
 
 - Set `SECRET_KEY` to a unique random secret and keep it in the host's secret manager.
 - Set `APP_ENV=production`; startup refuses to use the development fallback key in this mode.
-- Set `APP_BASE_URL` to the canonical HTTPS origin (for example `https://gastos.example.com`). Production startup rejects a missing/non-HTTPS URL, URL path, or SQLite database. Invitation links are not built from request headers.
+- Set `APP_BASE_URL` to a custom canonical HTTPS origin if you use a domain; otherwise Render's HTTPS URL is used. Production startup rejects a missing/non-HTTPS URL, URL path, or SQLite database. Invitation links are not built from request headers.
 - Set `DATABASE_URL` to the production PostgreSQL connection string. Back up existing data before deployment. The web service's health check at `/health` checks database connectivity.
 - Configure SMTP values if invitations should be delivered by email.
 - Serve the app behind HTTPS and use a production WSGI server. Direct `python app.py` startup enables debug mode only when `FLASK_DEBUG=1`.

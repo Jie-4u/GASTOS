@@ -2,6 +2,8 @@ services:
   - type: web
     name: gastos
     runtime: python
+    region: singapore
+    plan: 0.5c-512mb
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn --workers 1 --threads 4 --timeout 30 app:app
     healthCheckPath: /health
@@ -10,10 +12,10 @@ services:
         value: production
       - key: SECRET_KEY
         generateValue: true
-      - key: APP_BASE_URL
-        sync: false
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: gastos-db
+          property: connectionString
       - key: SMTP_HOST
         value: smtp-relay.brevo.com
       - key: SMTP_PORT
@@ -26,3 +28,24 @@ services:
         sync: false
       - key: SMTP_FROM_NAME
         value: Gastos
+      - key: PAYMENT_PROVIDER
+        value: paymongo
+      - key: PAYMENT_PROVIDER_SECRET
+        sync: false
+      - key: PAYMENT_PUBLIC_KEY
+        sync: false
+      - key: PAYMONGO_WEBHOOK_SECRET
+        sync: false
+      - key: PAYMONGO_PLAN_MONTHLY_ID
+        sync: false
+      - key: PAYMONGO_PLAN_ANNUAL_ID
+        sync: false
+
+databases:
+  - name: gastos-db
+    databaseName: gastos
+    user: gastos
+    plan: 0.1c-256mb
+    region: singapore
+    diskSizeGB: 1
+    storageAutoscalingEnabled: false

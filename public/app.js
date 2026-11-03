@@ -2,36 +2,23 @@ const app = document.getElementById('app');
 const S = { view: 'welcome', me: null, stack: [], k: 'expense', inviteToken: new URLSearchParams(location.search).get('invite'), resetToken: new URLSearchParams(location.search).get('reset'), paymentReturn: new URLSearchParams(location.search).get('payment'), inviteInfo: null, newInvite: null, pendingPayment: null, resetRequested: false, editingTx: null, editingBill: null, editingBudget: null, billing: 'monthly' };
 const peso = n => '₱' + Number(n).toLocaleString('en-PH', { maximumFractionDigits: 2 });
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const today = () => {
-  const parts = Object.fromEntries(new Intl.DateTimeFormat('en', {timeZone:'Asia/Manila',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()).map(p=>[p.type,p.value]));
-  return `${parts.year}-${parts.month}-${parts.day}`;
+// const today = () => new Date().toISOString().slice(0, 10);
+const MANILA_DATE = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'Asia/Manila',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit'
+});
+
+const manilaDate = (d = new Date()) => {
+  const p = MANILA_DATE.formatRangeToParts(d);
+  const get = type => p.find(x => x.type === type).value;
+
+  return `${get('year')}-${get('month')}-${get('day')}`;
 };
-const billDueStatus = bill => bill.due_status || (bill.due < today() ? 'overdue' : bill.due === today() ? 'due_today' : 'upcoming');
-function prepareProfilePhoto(file) {
-  return new Promise((resolve, reject) => {
-    if (!file || !file.size) return resolve('');
-    if (!['image/jpeg','image/png','image/webp'].includes(file.type)) return reject(new Error('Choose a JPEG, PNG, or WebP photo.'));
-    if (file.size > 8 * 1024 * 1024) return reject(new Error('Choose an image smaller than 8 MB.'));
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error('The selected photo could not be read.'));
-    reader.onload = () => {
-      const image = new Image();
-      image.onerror = () => reject(new Error('The selected photo could not be opened.'));
-      image.onload = () => {
-        const scale = Math.min(1, 512 / Math.max(image.naturalWidth, image.naturalHeight));
-        const canvas = document.createElement('canvas');
-        canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
-        canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
-        canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
-        const resized = canvas.toDataURL('image/jpeg', .82);
-        if (resized.length > 1_350_000) return reject(new Error('This photo is too large after resizing. Choose another image.'));
-        resolve(resized);
-      };
-      image.src = reader.result;
-    };
-    reader.readAsDataURL(file);
-  });
-}
+
+const today = () => manilaDate();
+
 function toast(m) { const t = document.getElementById('toast'); t.textContent = m; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2800); }
 async function api(p, m = 'GET', b) {
   const r = await fetch('/api/' + p, { method: m, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (localStorage.t || '') }, body: b ? JSON.stringify(b) : undefined });
@@ -41,7 +28,13 @@ async function api(p, m = 'GET', b) {
   if (!r.ok) throw new Error(d.error || `Request failed (${r.status}). Please refresh and try again.`);
   return d;
 }
-const lbl = d => { const t = today(), y = new Date(Date.now() - 864e5).toISOString().slice(0, 10); return d === t ? 'Today' : d === y ? 'Yesterday' : d; };
+//const lbl = d => { const t = today(), y = new Date(Date.now() - 864e5).toISOString().slice(0, 10); return d === t ? 'Today' : d === y ? 'Yesterday' : d; };
+const lbl = d => {
+  const t = today(),
+  y = manilaDate(new Date(Date.now() - 864e5));
+  return d === t ? 'Today' : d === y ? 'Yesterday' : d;
+};
+
 const bar = p => `<div class="bar"><i style="width:${Math.min(100, p)}%"></i></div>`;
 const row = (a, b) => `<div class="row"><span>${a}</span><span>${b}</span></div>`;
 

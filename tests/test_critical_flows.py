@@ -63,6 +63,16 @@ class CriticalFlowTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(self.client.get("/api/me", headers=self.owner_headers).json["family"]["plan"], "free")
 
+    def test_demo_upgrade_and_downgrade_only_when_demo_payments_enabled(self):
+        with patch.dict(os.environ, {"DEMO_PAYMENTS": "1"}):
+            self.assertEqual(self.client.post("/api/upgrade", headers=self.owner_headers,
+                                              json={"period": "weekly"}).status_code, 400)
+            self.assertEqual(self.client.post("/api/upgrade", headers=self.owner_headers,
+                                              json={"period": "monthly"}).status_code, 200)
+            self.assertEqual(self.client.get("/api/me", headers=self.owner_headers).json["family"]["plan"], "premium")
+            self.assertEqual(self.client.post("/api/downgrade", headers=self.owner_headers).status_code, 200)
+        self.assertEqual(self.client.get("/api/me", headers=self.owner_headers).json["family"]["plan"], "free")
+
     def test_invitation_survives_refresh_resend_rotates_link_and_accepts_once(self):
         created = self.client.post("/api/invite", headers=self.owner_headers, json={"email": "member@example.com"})
         self.assertEqual(created.status_code, 200)

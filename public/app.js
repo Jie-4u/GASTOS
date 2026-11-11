@@ -13,6 +13,7 @@ const lbl = d => { const n = days(d); return n === 0 ? 'Today' : n === -1 ? 'Yes
 const due = d => { const n = days(d); return n < 0 ? [`Overdue by ${-n} day${n === -1 ? '' : 's'}`, 'bad'] : n === 0 ? ['Due today', 'warn'] : n <= 3 ? [`Due in ${n} day${n === 1 ? '' : 's'}`, 'warn'] : [`Due ${fdate(d)}`, '']; };
 const first = n => String(n || '').trim().split(/\s+/)[0];
 const owner = () => !!S.me?.family?.owner;
+const manageFinances = () => !!S.me?.family?.permissions?.manage_finances || owner() || S.me?.family?.role === 'Parent';
 const isPrem = () => S.me?.family?.plan === 'premium';
 const approved = t => !t.status || t.status === 'approved';
 const sum = (l, f) => l.reduce((a, x) => a + f(x), 0);
@@ -106,7 +107,7 @@ async function api(p, m = 'GET', b) {
 const statusBadge = t => t.status === 'pending' ? ' <span class="badge warn">Pending approval</span>' : t.status === 'rejected' ? ' <span class="badge bad">Rejected</span>' : '';
 const txRow = t => { const tag = t.id && t.can_edit ? 'button' : 'div'; return `<${tag} class="item" ${tag === 'button' ? `data-go="edittx" data-id="${t.id}"` : ''}>${catIco(t.category)}<span class="grow"><b>${esc(t.note || t.category)}</b><small>${esc(t.category)} · ${esc(t.member)}${t.id ? '' : ` · ${lbl(t.date)}`}${t.has_receipt ? ' · 🧾' : ''}${statusBadge(t)}</small></span><span class="amt ${approved(t) ? t.kind : 'mu'}">${t.kind === 'income' ? '+' : '−'}${peso(t.amount)}</span></${tag}>`; };
 const approvalRow = t => `<div class="item">${catIco(t.category)}<span class="grow"><b>${esc(t.note || t.category)}</b><small>${esc(t.member)} · ${lbl(t.date)}</small></span><span class="end"><span class="amt">−${peso(t.amount)}</span><span class="row-acts">${t.has_receipt ? `<button class="iconbtn sm" data-act="receipt" data-id="${t.id}" aria-label="View receipt">🧾</button>` : ''}<button class="iconbtn sm" data-act="reject" data-id="${t.id}" aria-label="Reject ${esc(t.note || t.category)}">${I.x}</button><button class="btn sm soft" data-act="approve" data-id="${t.id}">${I.check}Approve</button></span></span></div>`;
-const billRow = (b, full) => { const [t, c] = due(b.due); return `<div class="item">${catIco('Bills')}<span class="grow"><b>${esc(b.name)}</b><small><span class="badge ${c}">${t}</span></small></span><span class="end"><span class="amt">${peso(b.amount)}</span>${full && owner() ? `<span class="row-acts"><button class="iconbtn sm" data-go="editbill" data-id="${b.id}" aria-label="Edit ${esc(b.name)}">${I.edit}</button><button class="btn sm soft" data-act="pay" data-id="${b.id}">${I.check}Paid</button></span>` : ''}</span></div>`; };
+const billRow = (b, full) => { const [t, c] = due(b.due); return `<div class="item">${catIco('Bills')}<span class="grow"><b>${esc(b.name)}</b><small><span class="badge ${c}">${t}</span></small></span><span class="end"><span class="amt">${peso(b.amount)}</span>${full && manageFinances() ? `<span class="row-acts"><button class="iconbtn sm" data-go="editbill" data-id="${b.id}" aria-label="Edit ${esc(b.name)}">${I.edit}</button><button class="btn sm soft" data-act="pay" data-id="${b.id}">${I.check}Paid</button></span>` : ''}</span></div>`; };
 const budgetRow = b => {
   const lim = b.limit ?? b.monthly_limit, p = lim ? b.spent / lim * 100 : 0, cls = p >= 100 ? 'over' : p >= 80 ? 'warn' : '';
   return `<span class="brow">${catIco(b.category)}<span class="grow"><span class="between"><b>${esc(b.category)}</b><span class="small ${cls ? 'tx-' + cls : 'mu'}">${peso(b.spent)} / ${peso(lim)}</span></span>${bar(p, cls)}<small>${p >= 100 ? `Over by ${peso(b.spent - lim)}` : `${peso(lim - b.spent)} left · ${Math.round(p)}% used`}</small></span></span>`;
@@ -168,15 +169,15 @@ V.family = async () => ({ title: 'Set up your family', sub: `Welcome, ${esc(firs
 
 const inviteForm = () => {
   const f = S.me.family, used = f.members.length + f.invites.filter(i => i.status === 'pending').length;
-  return `<form data-f="invite" class="card stack">${cardH('Invite a family member', `<span class="badge ${used >= f.limit ? 'bad' : ''}">${used} / ${f.limit} seats</span>`)}<p class="note" style="margin-top:-8px">They'll get a link to join <b>${esc(f.name)}</b>. Links expire after 7 days.</p><div class="inline"><input name="email" type="email" placeholder="family@example.com" aria-label="Member email" required><button class="btn">${I.send}Invite</button></div></form>`;
+  return `<form data-f="invite" class="card stack">${cardH('Invite a family member', `<span class="badge ${used >= f.limit ? 'bad' : ''}">${used} / ${f.limit} seats</span>`)}<p class="note" style="margin-top:-8px">They'll get a link to join <b>${esc(f.name)}</b>. Links expire after 7 days.</p><input name="email" type="email" placeholder="family@example.com" aria-label="Member email" required><label class="field"><span>Assign role</span><select name="role" aria-label="Family role"><option value="Member">Member</option><option value="Parent">Parent</option></select></label><small class="note">Parents can manage bills, budgets, goals and expense approvals. Members can manage their own transactions and contribute to goals.</small><button class="btn">${I.send}Invite</button></form>`;
 };
 const memberList = () => {
   const f = S.me.family;
-  return `<div class="card list">${f.members.map(m => `<div class="item">${av(m.name)}<span class="grow"><b>${esc(m.name)}</b><small>${m.owner ? 'Full access · manages bills, budgets & members' : `${esc(m.role || 'Member')} · can add transactions & savings`}</small></span>${m.owner ? '<span class="badge gold">Owner</span>' : owner() ? `<button class="iconbtn sm" data-act="removemember" data-id="${m.id}" aria-label="Remove ${esc(m.name)}">${I.x}</button>` : ''}</div>`).join('')}</div>`;
+  return `<div class="card list">${f.members.map(m => { const role = m.role || 'Member'; const desc = m.owner ? 'Full access · manages family, plan & finances' : role === 'Parent' ? 'Can manage bills, budgets, goals & expense approvals' : 'Can view family finances, manage own transactions & contribute to goals'; return `<div class="item">${av(m.name)}<span class="grow"><b>${esc(m.name)}</b><small>${desc}</small></span>${m.owner ? '<span class="badge gold">Owner</span>' : owner() ? `<select class="member-role" data-member-role data-id="${m.id}" data-current-role="${esc(role)}" aria-label="Role for ${esc(m.name)}"><option value="Member" ${role === 'Member' ? 'selected' : ''}>Member</option><option value="Parent" ${role === 'Parent' ? 'selected' : ''}>Parent</option></select><button class="iconbtn sm" data-act="removemember" data-id="${m.id}" aria-label="Remove ${esc(m.name)}">${I.x}</button>` : `<span class="badge">${esc(role)}</span>`}</div>`; }).join('')}</div>`;
 };
 const inviteList = () => {
   const l = S.me.family.invites.filter(i => i.status === 'pending' || i.status === 'expired');
-  return l.length ? `<h3 class="sec">Invitations</h3><div class="card list">${l.map(i => `<div class="item"><span class="av" style="--h:${hue(i.email)}">${I.mail}</span><span class="grow"><b>${esc(i.email)}</b><small>${i.status === 'expired' ? '<span class="badge bad">Expired</span>' : `${i.expires ? `Expires ${fdate(i.expires.slice(0, 10))} · ` : ''}${i.delivery === 'sent' ? 'Email sent' : i.delivery === 'failed' ? 'Email failed, share the link' : 'Share the link'}`}</small></span>${owner() ? `<span class="row-acts">${i.link ? `<button class="iconbtn sm" data-act="copylink" data-id="${i.id}" title="Copy invite link" aria-label="Copy invite link">${I.copy}</button>` : ''}<button class="iconbtn sm" data-act="resend" data-id="${i.id}" title="Resend" aria-label="Resend invite">${I.refresh}</button><button class="iconbtn sm" data-act="revoke" data-id="${i.id}" title="Cancel invite" aria-label="Cancel invite">${I.x}</button></span>` : '<span class="badge warn">Pending</span>'}</div>`).join('')}</div>` : '';
+  return l.length ? `<h3 class="sec">Invitations</h3><div class="card list">${l.map(i => `<div class="item"><span class="av" style="--h:${hue(i.email)}">${I.mail}</span><span class="grow"><b>${esc(i.email)}</b><small>${esc(i.role || 'Member')} · ${i.status === 'expired' ? '<span class="badge bad">Expired</span>' : `${i.expires ? `Expires ${fdate(i.expires.slice(0, 10))} · ` : ''}${i.delivery === 'sent' ? 'Email sent' : i.delivery === 'failed' ? 'Email failed, share the link' : 'Share the link'}`}</small></span>${owner() ? `<span class="row-acts">${i.link ? `<button class="iconbtn sm" data-act="copylink" data-id="${i.id}" title="Copy invite link" aria-label="Copy invite link">${I.copy}</button>` : ''}<button class="iconbtn sm" data-act="resend" data-id="${i.id}" title="Resend" aria-label="Resend invite">${I.refresh}</button><button class="iconbtn sm" data-act="revoke" data-id="${i.id}" title="Cancel invite" aria-label="Cancel invite">${I.x}</button></span>` : '<span class="badge warn">Pending</span>'}</div>`).join('')}</div>` : '';
 };
 V.invite = async () => ({ title: 'Invite your family', sub: 'Almost done', narrow: 1, html: `${inviteForm()}<h3 class="sec">Members</h3>${memberList()}${inviteList()}<button class="btn lg" data-act="finish">Continue to dashboard ${I.next}</button>` });
 
@@ -189,7 +190,7 @@ V.home = async () => {
   const approvals = d.approvals.length ? `<div class="card" ${o(0)}>${cardH(`Waiting for your approval`, `<span class="badge warn">${d.approvals.length}</span>`)}<div class="list">${d.approvals.map(approvalRow).join('')}</div></div>` : '';
   return { title: `${h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'}, ${esc(first(S.me.name))}`, sub: esc(f.name), nav: 1, right: meBtn(), html: `<div class="grid"><div class="col">${reminders}${approvals}
   <section class="hero" ${o(1)}><small>${month} balance</small><div class="big">${peso(d.balance)}</div><div class="split"><div class="pill"><i>${I.up}</i><span><small>Income</small><b>${peso(d.income)}</b></span></div><div class="pill"><i>${I.down}</i><span><small>Expenses</small><b>${peso(d.expense)}</b></span></div></div></section>
-  <div class="quick" ${o(2)}><button data-go="addtx" data-k="income"><i>${I.up}</i>Income</button><button data-go="addtx" data-k="expense"><i class="ex">${I.down}</i>Expense</button>${owner() ? `<button data-go="addbill"><i>${I.receipt}</i>Add bill</button><button data-go="addgoal"><i>${I.target}</i>New goal</button>` : `<button data-tab="plan" data-plan="bills"><i>${I.receipt}</i>Bills</button><button data-tab="plan" data-plan="goals"><i>${I.target}</i>Goals</button>`}</div>
+  <div class="quick" ${o(2)}><button data-go="addtx" data-k="income"><i>${I.up}</i>Income</button><button data-go="addtx" data-k="expense"><i class="ex">${I.down}</i>Expense</button>${manageFinances() ? `<button data-go="addbill"><i>${I.receipt}</i>Add bill</button><button data-go="addgoal"><i>${I.target}</i>New goal</button>` : `<button data-tab="plan" data-plan="bills"><i>${I.receipt}</i>Bills</button><button data-tab="plan" data-plan="goals"><i>${I.target}</i>Goals</button>`}</div>
   <div class="card" ${o(5)}>${cardH('Recent activity', '<button class="link" data-tab="tx">See all</button>')}${d.recent.length ? `<div class="list">${d.recent.map(txRow).join('')}</div>` : empty('🧾', 'No transactions yet', 'Log your first income or expense to get started.', `<button class="btn sm" data-go="addtx" data-k="expense">${I.plus}Add transaction</button>`)}</div>
   <div class="card" ${o(6)}>${cardH('Cash flow', '<button class="link" data-tab="reports">Reports</button>')}${flowChart(d.months)}</div>
   </div><div class="col">
@@ -239,20 +240,20 @@ const P = {};
 V.plan = async () => ({ title: 'Plan', sub: 'Budgets, bills & savings goals', nav: 1, right: meBtn(), html: seg([['budgets', 'Budgets'], ['bills', 'Bills'], ['goals', 'Goals']], S.plan, k => `data-tab="plan" data-plan="${k}"`) + await P[S.plan]() });
 P.budgets = async () => {
   const b = S.budgets = await api('budgets'), full = !isPrem() && b.length >= 3;
-  const add = !owner() ? '' : full ? lock('Unlimited budgets with Premium', 'The Free plan includes 3 budgets') : `<button class="btn ${b.length ? 'ghost' : ''}" data-act="budget">${I.plus}Set a budget</button>`;
-  if (!b.length) return `<div class="card">${empty('🧮', 'No budgets yet', owner() ? 'Set a monthly limit per category and Gastos will warn you when you get close.' : "Your family owner hasn't set any budgets yet.", add)}</div>`;
+  const add = !manageFinances() ? '' : full ? lock('Unlimited budgets with Premium', 'The Free plan includes 3 budgets') : `<button class="btn ${b.length ? 'ghost' : ''}" data-act="budget">${I.plus}Set a budget</button>`;
+  if (!b.length) return `<div class="card">${empty('🧮', 'No budgets yet', manageFinances() ? 'Set a monthly limit per category and Gastos will warn you when you get close.' : "Your family Parent or owner hasn't set any budgets yet.", add)}</div>`;
   const lim = sum(b, x => x.monthly_limit), sp = sum(b, x => x.spent);
   return `<div class="card stack"><div class="between"><span><small class="mu">Spent this month</small><h2>${peso(sp)}</h2></span><span class="mu small">of ${peso(lim)}</span></div>${bar(sp / lim * 100, sp >= lim ? 'over' : sp >= lim * .8 ? 'warn' : '')}</div>
-  <div class="card list">${b.map(x => owner() ? `<button class="item" data-act="budget" data-id="${x.id}">${budgetRow(x)}</button>` : `<div class="item">${budgetRow(x)}</div>`).join('')}</div>${add}`;
+  <div class="card list">${b.map(x => manageFinances() ? `<button class="item" data-act="budget" data-id="${x.id}">${budgetRow(x)}</button>` : `<div class="item">${budgetRow(x)}</div>`).join('')}</div>${add}`;
 };
 P.bills = async () => {
-  const b = S.bills = await api('bills'), add = owner() ? `<button class="btn ${b.length ? 'ghost' : ''}" data-go="addbill">${I.plus}Add a bill</button>` : '';
+  const b = S.bills = await api('bills'), add = manageFinances() ? `<button class="btn ${b.length ? 'ghost' : ''}" data-go="addbill">${I.plus}Add a bill</button>` : '';
   if (!b.length) return `<div class="card">${empty('✅', 'All caught up', 'No unpaid bills. Add bills like rent, Meralco or tuition so nobody forgets.', add)}</div>`;
   const over = b.filter(x => days(x.due) < 0).length;
-  return `<div class="stats">${stat('Total unpaid', peso(sum(b, x => x.amount)))}${stat('Overdue', over, over ? 'tx-out' : '')}${stat('Next due', fdate(b[0].due))}</div><div class="card list">${b.map(x => billRow(x, 1)).join('')}</div>${add}${owner() ? '' : '<p class="note center">Only the family owner can add or mark bills as paid.</p>'}`;
+  return `<div class="stats">${stat('Total unpaid', peso(sum(b, x => x.amount)))}${stat('Overdue', over, over ? 'tx-out' : '')}${stat('Next due', fdate(b[0].due))}</div><div class="card list">${b.map(x => billRow(x, 1)).join('')}</div>${add}${manageFinances() ? '' : '<p class="note center">Only a Parent or family owner can manage bills.</p>'}`;
 };
 P.goals = async () => {
-  const g = S.goals = await api('goals'), add = owner() ? `<button class="btn ${g.length ? 'ghost' : ''}" data-go="addgoal">${I.plus}Create a goal</button>` : '';
+  const g = S.goals = await api('goals'), add = manageFinances() ? `<button class="btn ${g.length ? 'ghost' : ''}" data-go="addgoal">${I.plus}Create a goal</button>` : '';
   if (!g.length) return `<div class="card">${empty('🎯', 'Start a savings goal', 'Emergency fund, tuition, a family trip: save for it together and watch the progress.', add)}</div>`;
   return g.map(x => { const p = Math.min(100, Math.round(x.saved * 100 / x.target)); return `<div class="card goal"><span class="ring" style="--p:${p}"><span>${p}%</span></span><span class="grow"><b>${esc(x.name)}</b><small>${peso(x.saved)} of ${peso(x.target)}</small><small>${p >= 100 ? '🎉 Goal reached!' : `${peso(x.target - x.saved)} to go`}</small></span><button class="btn sm soft" data-act="fund" data-id="${x.id}">${I.plus}Add</button></div>`; }).join('') + add;
 };
@@ -477,6 +478,15 @@ document.addEventListener('submit', async e => {
 });
 document.addEventListener('change', e => {
   const t = e.target;
+  if (t.matches('[data-member-role]')) {
+    const oldRole = t.dataset.currentRole, member = S.me?.family?.members.find(m => String(m.id) === t.dataset.id);
+    t.disabled = true;
+    api(`family/members/${encodeURIComponent(t.dataset.id)}/role`, 'PUT', { role: t.value })
+      .then(async () => { await loadMe(); toast(`${member?.name || 'Member'} is now ${t.value}`); render(); })
+      .catch(x => { t.value = oldRole; toast(x.message, 1); })
+      .finally(() => { t.disabled = false; });
+    return;
+  }
   if (t.name === 'kind' && t.form?.dataset.f === 'savetx') document.getElementById('catchips').innerHTML = catChips(t.value);
   if (t.matches('[data-avatar]') && t.files[0]) pickAvatar(t.files[0]).catch(x => toast(x.message, 1));
   if (t.matches('[data-receipt]') && t.files[0]) scanReceipt(t.files[0], t.form).catch(x => toast(x.message, 1));

@@ -70,6 +70,12 @@ invite_ser = URLSafeTimedSerializer(secret, salt="gastos-invitation-v1")
 reset_ser = URLSafeTimedSerializer(secret, salt="gastos-password-reset-v1")
 LIMIT = {"free": 4, "premium": 10}
 FREE_BUDGETS = 3
+FAMILY_ROLES = ("Parent", "Member")
+
+
+def can_manage_finances(user=None):
+    user = user or g.u
+    return bool(user.is_owner or user.role == "Parent")
 
 
 class Family(db.Model):
@@ -580,6 +586,9 @@ def me():
         f = db.session.get(Family, u.family_id)
         out["family"] = {"name": f.name, "plan": f.plan, "limit": LIMIT[f.plan], "owner": u.is_owner,
                          "role": "Owner" if u.is_owner else (u.role or "Member"),
+                         "permissions": {"manage_members": bool(u.is_owner),
+                                         "manage_finances": can_manage_finances(u),
+                                         "manage_billing": bool(u.is_owner)},
                          "members": [{"id": m.id, "name": m.name, "role": m.role, "owner": m.is_owner}
                                      for m in User.query.filter_by(family_id=f.id)],
                          "invites": [{"id": i.id, "email": i.email, "role": i.role or "Member",
@@ -688,15 +697,35 @@ def remove_family_member(user_id):
     return jsonify(ok=1)
 
 
+@app.put("/api/family/members/<int:user_id>/role")
+@fam
+def update_family_member_role(user_id):
+    if not g.u.is_owner:
+        return err("Only the family owner can change member roles", 403)
+    member = User.query.filter_by(id=user_id, family_id=g.f.id).first_or_404()
+    if member.is_owner:
+        return err("The family owner's role cannot be changed", 409)
+    role = body().get("role")
+    if role not in FAMILY_ROLES:
+        return err("Choose Parent or Member")
+    member.role = role
+    db.session.commit()
+    return jsonify(ok=1, member={"id": member.id, "role": member.role})
+
+
 @app.post("/api/invite")
 @fam
 def invite():
     if not g.u.is_owner:
         return err("Only the family owner can invite members", 403)
-    raw_email = body().get("email", "")
+    data = body()
+    raw_email = data.get("email", "")
     email = raw_email.strip().lower() if isinstance(raw_email, str) else ""
     if len(email) > 200 or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
         return err("Enter a valid email")
+    role = data.get("role", "Member")
+    if role not in FAMILY_ROLES:
+        return err("Choose Parent or Member")
     now = datetime.utcnow()
     used = User.query.filter_by(family_id=g.f.id).count() + Invite.query.filter_by(
         family_id=g.f.id, accepted_at=None, revoked_at=None
@@ -713,7 +742,7 @@ def invite():
     ).first()
     if pending:
         return err("An invitation is already pending for that email")
-    inv = Invite(family_id=g.f.id, email=email, role="Member", inviter_id=g.u.id,
+    inv = Invite(family_id=g.f.id, email=email, role=role, inviter_id=g.u.id,
                  expires_at=datetime.utcnow() + timedelta(days=7))
     db.session.add(inv)
     db.session.flush()
@@ -729,7 +758,8 @@ def invite():
         return err("Invitation URL is not configured correctly. Update APP_BASE_URL and try again.", 503)
     delivery = send_and_record_invitation(inv, link)
     return jsonify(ok=1, invitation={"id": inv.id, "email": email, "status": "pending",
-                                     "expires": inv.expires_at.isoformat(), "link": link, "delivery": delivery})
+                                     "role": inv.role, "expires": inv.expires_at.isoformat(),
+                                     "link": link, "delivery": delivery})
 
 
 @app.get("/api/invitations/<token>")
@@ -1112,8 +1142,11 @@ def txs():
 @fam
 def tx_detail(i):
     row = Tx.query.filter_by(id=i, family_id=g.f.id).first_or_404()
-    if not g.u.is_owner and row.user_id != g.u.id:
-        return err("Members can only edit or view their own transaction details", 403)
+    if request.method == "GET":
+        if not can_manage_finances() and row.user_id != g.u.id:
+            return err("Members can only view their own transaction details", 403)
+    elif not g.u.is_owner and row.user_id != g.u.id:
+        return err("Members can only edit or delete their own transactions", 403)
     if request.method == "DELETE":
         try:
             db.session.delete(row)
@@ -1154,9 +1187,11 @@ def tx_detail(i):
 @app.post("/api/transactions/<int:i>/<any(approve, reject):decision>")
 @fam
 def tx_decide(i, decision):
-    if not g.u.is_owner:
-        return err("Only the family owner can approve expenses", 403)
+    if not can_manage_finances():
+        return err("Only a Parent or the family owner can approve expenses", 403)
     row = Tx.query.filter_by(id=i, family_id=g.f.id, status="pending").first_or_404()
+    if not g.u.is_owner and row.user_id == g.u.id:
+        return err("You cannot approve your own expense", 403)
     row.status = "approved" if decision == "approve" else "rejected"
     db.session.commit()
     return jsonify(ok=1, status=row.status)
@@ -1217,7 +1252,7 @@ def dash():
     approvals = [{"id": r.id, "kind": r.kind, "amount": r.amount, "category": r.category, "note": r.note,
                   "date": r.date.isoformat(), "member": members.get(r.user_id, "Family member"),
                   "has_receipt": bool(r.receipt_data)}
-                 for r in Tx.query.filter_by(family_id=g.f.id, status="pending").order_by(Tx.date.desc())] if g.u.is_owner else []
+                 for r in Tx.query.filter_by(family_id=g.f.id, status="pending").order_by(Tx.date.desc())] if can_manage_finances() else []
     totals.update(category_totals=categories, months=months, recent=recent, bills=bills,
                    budgets=budget_progress, approvals=approvals,
                    savings={"saved": saved, "target": target,
@@ -1281,8 +1316,8 @@ def export():
 @fam
 def bills():
     if request.method == "POST":
-        if not g.u.is_owner:
-            return err("Only the family owner can manage bills", 403)
+        if not can_manage_finances():
+            return err("Only a Parent or the family owner can manage bills", 403)
         d = body()
         try:
             amt = num(d.get("amount"))
@@ -1306,8 +1341,8 @@ def bills():
 @fam
 def bill_detail(i):
     bill = Bill.query.filter_by(id=i, family_id=g.f.id).first_or_404()
-    if request.method != "GET" and not g.u.is_owner:
-        return err("Only the family owner can manage bills", 403)
+    if request.method != "GET" and not can_manage_finances():
+        return err("Only a Parent or the family owner can manage bills", 403)
     if bill.paid:
         return err("Paid bills can no longer be changed", 409)
     if request.method == "DELETE":
@@ -1332,8 +1367,8 @@ def bill_detail(i):
 @app.post("/api/bills/<int:i>/pay")
 @fam
 def pay(i):
-    if not g.u.is_owner:
-        return err("Only the family owner can mark bills as paid", 403)
+    if not can_manage_finances():
+        return err("Only a Parent or the family owner can mark bills as paid", 403)
     b = Bill.query.filter_by(id=i, family_id=g.f.id).first_or_404()
     if b.paid:
         return err("This bill has already been paid", 409)
@@ -1348,8 +1383,8 @@ def pay(i):
 @fam
 def goals():
     if request.method == "POST":
-        if not g.u.is_owner:
-            return err("Only the family owner can create savings goals", 403)
+        if not can_manage_finances():
+            return err("Only a Parent or the family owner can create savings goals", 403)
         d = body()
         try:
             tgt = num(d.get("target"))
@@ -1381,8 +1416,8 @@ def goal_add(i):
 @fam
 def budgets():
     if request.method == "POST":
-        if not g.u.is_owner:
-            return err("Only the family owner can manage budgets", 403)
+        if not can_manage_finances():
+            return err("Only a Parent or the family owner can manage budgets", 403)
         d = body()
         category = d.get("category") if isinstance(d.get("category"), str) else ""
         if not category.strip() or len(category.strip()) > 60:
@@ -1413,8 +1448,8 @@ def budgets():
 @app.route("/api/budgets/<int:i>", methods=["PUT", "DELETE"])
 @fam
 def budget_detail(i):
-    if not g.u.is_owner:
-        return err("Only the family owner can manage budgets", 403)
+    if not can_manage_finances():
+        return err("Only a Parent or the family owner can manage budgets", 403)
     budget = Budget.query.filter_by(id=i, family_id=g.f.id).first_or_404()
     if request.method == "DELETE":
         db.session.delete(budget)

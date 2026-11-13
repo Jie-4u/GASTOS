@@ -44,8 +44,9 @@ if not secret and os.environ.get("APP_ENV") == "production":
     raise RuntimeError("SECRET_KEY must be configured in production")
 secret = secret or "local-development-only-change-me"
 url = os.environ.get("DATABASE_URL", "sqlite:///gastos.db")
-if url.startswith("postgres://"):
-    url = url.replace("postgres://", "postgresql://", 1)
+if url.startswith(("postgres://", "postgresql://")):
+    # Name the installed driver: SQLAlchemy 2.1 otherwise defaults to psycopg 3, which isn't in requirements.txt.
+    url = "postgresql+psycopg2://" + url.split("://", 1)[1]
 def configured_app_base_url():
     return os.environ.get("APP_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
 
@@ -68,6 +69,13 @@ ser = URLSafeTimedSerializer(secret)
 invite_ser = URLSafeTimedSerializer(secret, salt="gastos-invitation-v1")
 reset_ser = URLSafeTimedSerializer(secret, salt="gastos-password-reset-v1")
 LIMIT = {"free": 4, "premium": 10}
+FREE_BUDGETS = 3
+FAMILY_ROLES = ("Parent", "Member")
+
+
+def can_manage_finances(user=None):
+    user = user or g.u
+    return bool(user.is_owner or user.role == "Parent")
 
 
 class Family(db.Model):
@@ -135,6 +143,8 @@ class Tx(db.Model):
     category = db.Column(db.String(60))
     note = db.Column(db.String(200), default="")
     date = db.Column(db.Date, default=app_today)
+    status = db.Column(db.String(12), nullable=False, default="approved", server_default="approved")  # approved | pending | rejected
+    receipt_data = db.Column(db.Text)
 
 
 class Bill(db.Model):
@@ -160,8 +170,10 @@ class Budget(db.Model):
     category = db.Column(db.String(60), nullable=False)
     monthly_limit = db.Column(db.Float, nullable=False)
 
+
 def invitation_digest(inv):
     return hashlib.sha256(f"{inv.id}:{inv.token_nonce}".encode()).hexdigest()
+
 
 with app.app_context():
     db.create_all()
@@ -183,8 +195,13 @@ with app.app_context():
         if name not in user_cols:
             with db.engine.begin() as conn:
                 conn.exec_driver_sql(f"ALTER TABLE {user_table} ADD COLUMN {name} {sql}")
+    tx_cols = {c["name"] for c in db.inspect(db.engine).get_columns("tx")}
+    for name, sql in {"status": "VARCHAR(12) NOT NULL DEFAULT 'approved'", "receipt_data": "TEXT"}.items():
+        if name not in tx_cols:
+            with db.engine.begin() as conn:
+                conn.exec_driver_sql(f"ALTER TABLE tx ADD COLUMN {name} {sql}")
     # Additive migration for databases created by earlier Gastos versions.
-    cols = {c["name"] for c in db.inspect(db.engine).get_columns("invite")}
+    cols ={c["name"] for c in db.inspect(db.engine).get_columns("invite")}
     for name, sql in {
         "token_hash": "VARCHAR(64)", "token_nonce": "VARCHAR(64)", "role": "VARCHAR(40) DEFAULT 'Member'",
         "inviter_id": "INTEGER", "created_at": "TIMESTAMP", "expires_at": "TIMESTAMP",
@@ -205,6 +222,37 @@ with app.app_context():
 
 def err(m, c=400):
     return jsonify(error=m), c
+
+
+def body():
+    """The JSON request body, or {} when it is missing or not an object."""
+    d = request.get_json(silent=True)
+    return d if isinstance(d, dict) else {}
+
+
+def premium():
+    return g.f.plan == "premium"
+
+
+def approved_tx():
+    return Tx.query.filter_by(family_id=g.f.id, status="approved")
+
+
+def image_data_url(value):
+    """Validate a base64 image data URL; returns an error message or None."""
+    match = re.fullmatch(r"data:(image/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]*={0,2})", value)
+    if not match or len(value) > 1_400_000:
+        return "Choose a JPEG, PNG, or WebP photo smaller than 1 MB"
+    try:
+        image_bytes = base64.b64decode(match.group(2), validate=True)
+    except (ValueError, base64.binascii.Error):
+        return "The photo could not be read"
+    mime = match.group(1)
+    if not ((mime == "image/jpeg" and image_bytes.startswith(b"\xff\xd8\xff")) or
+            (mime == "image/png" and image_bytes.startswith(b"\x89PNG\r\n\x1a\n")) or
+            (mime == "image/webp" and image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP")):
+        return "The photo format is invalid"
+    return None
 
 
 @app.get("/health")
@@ -431,7 +479,7 @@ def home():
 
 @app.post("/api/password-reset/request")
 def password_reset_request():
-    d = request.get_json() or {}
+    d = body()
     email = d.get("email") if isinstance(d.get("email"), str) else ""
     email = email.strip().lower()
     user = User.query.filter_by(email=email).first() if re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) else None
@@ -455,7 +503,7 @@ def password_reset_request():
 
 @app.post("/api/password-reset/complete")
 def password_reset_complete():
-    d = request.get_json() or {}
+    d = body()
     value = d.get("token") if isinstance(d.get("token"), str) else ""
     password = d.get("password") if isinstance(d.get("password"), str) else ""
     if len(password) < 8:
@@ -482,7 +530,7 @@ def password_reset_complete():
 
 @app.post("/api/signup")
 def signup():
-    d = request.get_json() or {}
+    d = body()
     name = d.get("name") if isinstance(d.get("name"), str) else ""
     email = d.get("email") if isinstance(d.get("email"), str) else ""
     pw = d.get("password") if isinstance(d.get("password"), str) else ""
@@ -521,7 +569,7 @@ def signup():
 
 @app.post("/api/signin")
 def signin():
-    d = request.get_json() or {}
+    d = body()
     email = d.get("email") if isinstance(d.get("email"), str) else ""
     password = d.get("password") if isinstance(d.get("password"), str) else ""
     u = User.query.filter_by(email=email.strip().lower()).first()
@@ -538,6 +586,9 @@ def me():
         f = db.session.get(Family, u.family_id)
         out["family"] = {"name": f.name, "plan": f.plan, "limit": LIMIT[f.plan], "owner": u.is_owner,
                          "role": "Owner" if u.is_owner else (u.role or "Member"),
+                         "permissions": {"manage_members": bool(u.is_owner),
+                                         "manage_finances": can_manage_finances(u),
+                                         "manage_billing": bool(u.is_owner)},
                          "members": [{"id": m.id, "name": m.name, "role": m.role, "owner": m.is_owner}
                                      for m in User.query.filter_by(family_id=f.id)],
                          "invites": [{"id": i.id, "email": i.email, "role": i.role or "Member",
@@ -557,7 +608,7 @@ def profile():
     if request.method == "GET":
         return jsonify(name=g.u.name, email=g.u.email, avatar_data=g.u.avatar_data)
 
-    data = request.get_json(silent=True) or {}
+    data = body()
     name = data.get("name") if isinstance(data.get("name"), str) else g.u.name
     email = data.get("email") if isinstance(data.get("email"), str) else g.u.email
     name, email = name.strip(), email.strip().lower()
@@ -581,19 +632,9 @@ def profile():
         if avatar == "":
             g.u.avatar_data = None
         elif isinstance(avatar, str):
-            match = re.fullmatch(r"data:(image/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]*={0,2})", avatar)
-            if not match or len(avatar) > 1_400_000:
-                return err("Choose a JPEG, PNG, or WebP photo smaller than 1 MB")
-            try:
-                image_bytes = base64.b64decode(match.group(2), validate=True)
-            except (ValueError, base64.binascii.Error):
-                return err("The profile photo could not be read")
-            mime = match.group(1)
-            valid_signature = ((mime == "image/jpeg" and image_bytes.startswith(b"\xff\xd8\xff")) or
-                               (mime == "image/png" and image_bytes.startswith(b"\x89PNG\r\n\x1a\n")) or
-                               (mime == "image/webp" and image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP"))
-            if not valid_signature:
-                return err("The profile photo format is invalid")
+            problem = image_data_url(avatar)
+            if problem:
+                return err(problem)
             g.u.avatar_data = avatar
         else:
             return err("The profile photo format is invalid")
@@ -618,7 +659,7 @@ def profile():
 @app.post("/api/family")
 @auth
 def make_family():
-    d = request.get_json() or {}
+    d = body()
     if g.u.family_id:
         return err("You already have a family")
     name = d.get("name") if isinstance(d.get("name"), str) else ""
@@ -656,15 +697,35 @@ def remove_family_member(user_id):
     return jsonify(ok=1)
 
 
+@app.put("/api/family/members/<int:user_id>/role")
+@fam
+def update_family_member_role(user_id):
+    if not g.u.is_owner:
+        return err("Only the family owner can change member roles", 403)
+    member = User.query.filter_by(id=user_id, family_id=g.f.id).first_or_404()
+    if member.is_owner:
+        return err("The family owner's role cannot be changed", 409)
+    role = body().get("role")
+    if role not in FAMILY_ROLES:
+        return err("Choose Parent or Member")
+    member.role = role
+    db.session.commit()
+    return jsonify(ok=1, member={"id": member.id, "role": member.role})
+
+
 @app.post("/api/invite")
 @fam
 def invite():
     if not g.u.is_owner:
         return err("Only the family owner can invite members", 403)
-    raw_email = (request.get_json() or {}).get("email", "")
+    data = body()
+    raw_email = data.get("email", "")
     email = raw_email.strip().lower() if isinstance(raw_email, str) else ""
     if len(email) > 200 or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
         return err("Enter a valid email")
+    role = data.get("role", "Member")
+    if role not in FAMILY_ROLES:
+        return err("Choose Parent or Member")
     now = datetime.utcnow()
     used = User.query.filter_by(family_id=g.f.id).count() + Invite.query.filter_by(
         family_id=g.f.id, accepted_at=None, revoked_at=None
@@ -681,7 +742,7 @@ def invite():
     ).first()
     if pending:
         return err("An invitation is already pending for that email")
-    inv = Invite(family_id=g.f.id, email=email, role="Member", inviter_id=g.u.id,
+    inv = Invite(family_id=g.f.id, email=email, role=role, inviter_id=g.u.id,
                  expires_at=datetime.utcnow() + timedelta(days=7))
     db.session.add(inv)
     db.session.flush()
@@ -697,7 +758,8 @@ def invite():
         return err("Invitation URL is not configured correctly. Update APP_BASE_URL and try again.", 503)
     delivery = send_and_record_invitation(inv, link)
     return jsonify(ok=1, invitation={"id": inv.id, "email": email, "status": "pending",
-                                     "expires": inv.expires_at.isoformat(), "link": link, "delivery": delivery})
+                                     "role": inv.role, "expires": inv.expires_at.isoformat(),
+                                     "link": link, "delivery": delivery})
 
 
 @app.get("/api/invitations/<token>")
@@ -755,6 +817,8 @@ def resend_invitation(i):
     if not g.u.is_owner:
         return err("Only the family owner can resend invitations", 403)
     inv = Invite.query.filter_by(id=i, family_id=g.f.id, accepted_at=None, revoked_at=None).first_or_404()
+    if inv.delivery_attempted_at and inv.delivery_attempted_at > datetime.utcnow() - timedelta(minutes=1):
+        return err("This invitation was just emailed. Wait a minute before resending.", 429)
     inv.expires_at = datetime.utcnow() + timedelta(days=7)
     inv.token_nonce = secrets.token_urlsafe(24)
     replacement = invite_ser.dumps({"id": inv.id, "nonce": inv.token_nonce})
@@ -772,9 +836,37 @@ def resend_invitation(i):
 @app.post("/api/upgrade")
 @fam
 def upgrade():
+    # shortcut: simulated payment for class demos (DEMO_PAYMENTS=1); real billing goes through /api/subscriptions/checkout
     if not g.u.is_owner:
-        return err("Only the owner can upgrade")
-    return err("Premium activation requires a verified payment. Checkout is not configured yet.", 503)
+        return err("Only the family owner can manage billing", 403)
+    if os.environ.get("DEMO_PAYMENTS") != "1":
+        return err("Premium activation requires a verified payment. Demo payments are turned off on this server.", 503)
+    if g.f.plan == "premium":
+        return err("Your family is already on Premium", 409)
+    period = body().get("period")
+    if period not in ("monthly", "annual"):
+        return err("Choose monthly or annual billing")
+    db.session.add(Subscription(family_id=g.f.id, plan="premium", period=period,
+                                amount=99 if period == "monthly" else 999, status="active", payment_method="demo"))
+    g.f.plan = "premium"
+    db.session.commit()
+    return jsonify(ok=1)
+
+
+@app.post("/api/downgrade")
+@fam
+def downgrade():
+    if not g.u.is_owner:
+        return err("Only the family owner can manage billing", 403)
+    if g.f.plan != "premium":
+        return err("Your family is already on the Free plan", 409)
+    if User.query.filter_by(family_id=g.f.id).count() > LIMIT["free"]:
+        return err(f"The Free plan allows {LIMIT['free']} members. Remove members before switching.", 409)
+    for sub in Subscription.query.filter_by(family_id=g.f.id, status="active"):
+        sub.status = "cancelled"
+    g.f.plan = "free"
+    db.session.commit()
+    return jsonify(ok=1)
 
 
 @app.post("/api/subscriptions/checkout")
@@ -782,7 +874,7 @@ def upgrade():
 def checkout():
     if not g.u.is_owner:
         return err("Only the family owner can manage billing", 403)
-    d = request.get_json() or {}
+    d = body()
     period = d.get("period")
     if period not in ("monthly", "annual"):
         return err("Choose monthly or annual billing")
@@ -976,11 +1068,35 @@ def paymongo_webhook():
 def num(v):
     try:
         x = float(v)
-        if not math.isfinite(x) or x <= 0:
-            raise ValueError
-        return x
     except (TypeError, ValueError):
+        x = 0
+    if not math.isfinite(x) or x <= 0:
         raise ValueError("Enter an amount greater than 0")
+    if x > 1_000_000_000:  # larger values overflow the dashboard percentage maths
+        raise ValueError("Enter an amount up to ₱1,000,000,000")
+    return x
+
+
+def needs_approval(kind):
+    """Premium families: expenses logged by non-owners wait for the owner's approval."""
+    return premium() and not g.u.is_owner and kind == "expense"
+
+
+def apply_receipt(row, d):
+    """Set or clear row.receipt_data from the request; returns an error message or None."""
+    if "receipt_data" not in d:
+        return None
+    value = d["receipt_data"]
+    if value == "":
+        row.receipt_data = None
+        return None
+    if not premium():
+        return "Receipt scanning is a Premium feature"
+    problem = image_data_url(value) if isinstance(value, str) else "The receipt photo format is invalid"
+    if problem:
+        return problem
+    row.receipt_data = value
+    return None
 
 
 def pdate(s):
@@ -994,7 +1110,7 @@ def pdate(s):
 @fam
 def txs():
     if request.method == "POST":
-        d = request.get_json() or {}
+        d = body()
         try:
             amt = num(d.get("amount"))
             tx_date = pdate(d.get("date"))
@@ -1005,15 +1121,20 @@ def txs():
         kind = d["kind"]
         category = d.get("category") if isinstance(d.get("category"), str) else "Other"
         note = d.get("note") if isinstance(d.get("note"), str) else ""
-        db.session.add(Tx(family_id=g.f.id, user_id=g.u.id, kind=kind, amount=amt,
-                          category=(category or "Other")[:60], note=note[:200],
-                          date=tx_date))
+        row = Tx(family_id=g.f.id, user_id=g.u.id, kind=kind, amount=amt,
+                 category=(category or "Other")[:60], note=note[:200], date=tx_date,
+                 status="pending" if needs_approval(kind) else "approved")
+        problem = apply_receipt(row, d)
+        if problem:
+            return err(problem)
+        db.session.add(row)
         db.session.commit()
-        return jsonify(ok=1)
+        return jsonify(ok=1, status=row.status)
     rows = Tx.query.filter_by(family_id=g.f.id).order_by(Tx.date.desc(), Tx.id.desc()).limit(100)
     members = {u.id: u.name for u in User.query.filter_by(family_id=g.f.id)}
     return jsonify([{"id": r.id, "kind": r.kind, "amount": r.amount, "category": r.category,
                      "note": r.note, "date": r.date.isoformat(), "member": members.get(r.user_id, "Family member"),
+                     "status": r.status, "has_receipt": bool(r.receipt_data),
                      "can_edit": bool(g.u.is_owner or r.user_id == g.u.id)} for r in rows])
 
 
@@ -1021,8 +1142,11 @@ def txs():
 @fam
 def tx_detail(i):
     row = Tx.query.filter_by(id=i, family_id=g.f.id).first_or_404()
-    if not g.u.is_owner and row.user_id != g.u.id:
-        return err("Members can only edit or view their own transaction details", 403)
+    if request.method == "GET":
+        if not can_manage_finances() and row.user_id != g.u.id:
+            return err("Members can only view their own transaction details", 403)
+    elif not g.u.is_owner and row.user_id != g.u.id:
+        return err("Members can only edit or delete their own transactions", 403)
     if request.method == "DELETE":
         try:
             db.session.delete(row)
@@ -1033,7 +1157,7 @@ def tx_detail(i):
             return err("Could not delete this transaction. Please refresh and try again.", 500)
         return jsonify(ok=1)
     if request.method == "PUT":
-        d = request.get_json() or {}
+        d = body()
         try:
             row.amount = num(d.get("amount"))
             row.date = pdate(d.get("date"))
@@ -1044,15 +1168,33 @@ def tx_detail(i):
         category = d.get("category") if isinstance(d.get("category"), str) else "Other"
         note = d.get("note") if isinstance(d.get("note"), str) else ""
         row.kind, row.category, row.note = d["kind"], (category or "Other")[:60], note[:200]
+        row.status = "pending" if needs_approval(row.kind) else "approved"
+        problem = apply_receipt(row, d)
+        if problem:
+            db.session.rollback()
+            return err(problem)
         try:
             db.session.commit()
         except Exception:
             db.session.rollback()
             app.logger.exception("Transaction update failed")
             return err("Could not save these changes. Please refresh and try again.", 500)
-        return jsonify(ok=1)
+        return jsonify(ok=1, status=row.status)
     return jsonify(id=row.id, kind=row.kind, amount=row.amount, category=row.category,
-                   note=row.note, date=row.date.isoformat())
+                   note=row.note, date=row.date.isoformat(), status=row.status, receipt_data=row.receipt_data)
+
+
+@app.post("/api/transactions/<int:i>/<any(approve, reject):decision>")
+@fam
+def tx_decide(i, decision):
+    if not can_manage_finances():
+        return err("Only a Parent or the family owner can approve expenses", 403)
+    row = Tx.query.filter_by(id=i, family_id=g.f.id, status="pending").first_or_404()
+    if not g.u.is_owner and row.user_id == g.u.id:
+        return err("You cannot approve your own expense", 403)
+    row.status = "approved" if decision == "approve" else "rejected"
+    db.session.commit()
+    return jsonify(ok=1, status=row.status)
 
 
 def summarize(rows):
@@ -1066,15 +1208,15 @@ def summarize(rows):
             "cats": {k: round(v * 100 / exp) for k, v in cats.items()} if exp else {}}
 
 
-def year_rows(fid, y):
-    return [r for r in Tx.query.filter_by(family_id=fid) if r.date.year == y]
+def year_rows(y):
+    return approved_tx().filter(Tx.date >= date(y, 1, 1), Tx.date <= date(y, 12, 31)).all()
 
 
 @app.get("/api/dashboard")
 @fam
 def dash():
     t = app_today()
-    rows = Tx.query.filter_by(family_id=g.f.id).order_by(Tx.date.desc(), Tx.id.desc()).all()
+    rows = approved_tx().order_by(Tx.date.desc(), Tx.id.desc()).all()
     current = [r for r in rows if r.date.year == t.year and r.date.month == t.month]
     totals = summarize(current)
     categories = {}
@@ -1107,8 +1249,12 @@ def dash():
         budget_progress.append({"id": budget.id, "category": budget.category, "limit": budget.monthly_limit,
                                "spent": spent, "percent": ratio,
                                "status": "exceeded" if ratio >= 100 else "approaching" if ratio >= 80 else "normal"})
+    approvals = [{"id": r.id, "kind": r.kind, "amount": r.amount, "category": r.category, "note": r.note,
+                  "date": r.date.isoformat(), "member": members.get(r.user_id, "Family member"),
+                  "has_receipt": bool(r.receipt_data)}
+                 for r in Tx.query.filter_by(family_id=g.f.id, status="pending").order_by(Tx.date.desc())] if can_manage_finances() else []
     totals.update(category_totals=categories, months=months, recent=recent, bills=bills,
-                   budgets=budget_progress,
+                   budgets=budget_progress, approvals=approvals,
                    savings={"saved": saved, "target": target,
                             "percent": min(100, round(saved * 100 / target)) if target else 0})
     return jsonify(totals)
@@ -1118,7 +1264,7 @@ def dash():
 @fam
 def reports():
     t = app_today()
-    rows = year_rows(g.f.id, t.year)
+    rows = year_rows(t.year)
     goals = Goal.query.filter_by(family_id=g.f.id).all()
     tgt = sum(x.target for x in goals)
     months = {m: summarize([r for r in rows if r.date.month == m]) for m in range(1, t.month + 1)}
@@ -1126,20 +1272,43 @@ def reports():
     category_totals = {}
     for row in month_rows:
         category_totals[row.category] = category_totals.get(row.category, 0) + row.amount
+    advanced = None
+    if premium():
+        first = t.replace(day=1)
+        prev_first = (first - timedelta(days=1)).replace(day=1)
+        last_month, by_member = {}, {}
+        for r in approved_tx().filter(Tx.kind == "expense", Tx.date >= prev_first, Tx.date < first):
+            last_month[r.category] = last_month.get(r.category, 0) + r.amount
+        members = {u.id: u.name for u in User.query.filter_by(family_id=g.f.id)}
+        for r in month_rows:
+            name = members.get(r.user_id, "Family member")
+            by_member[name] = by_member.get(name, 0) + r.amount
+        days_in_month = ((first + timedelta(days=32)).replace(day=1) - first).days
+        daily = sum(category_totals.values()) / t.day
+        advanced = {"daily_average": daily, "projected": daily * days_in_month,
+                    "last_month": last_month, "last_month_total": sum(last_month.values()),
+                    "by_member": by_member}
     return jsonify(month=summarize([r for r in rows if r.date.month == t.month]),
                    year=summarize(rows), months=months,
-                   category_totals=category_totals,
+                   category_totals=category_totals, advanced=advanced,
                    savings=round(sum(x.saved for x in goals) * 100 / tgt) if tgt else 0)
+
+
+def csv_cell(v):
+    """Stop spreadsheet apps from running a note like =HYPERLINK(...) as a formula."""
+    return "'" + v if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r") else v
 
 
 @app.get("/api/export")
 @fam
 def export():
+    if not premium():
+        return err("Data export is a Premium feature", 403)
     out = io.StringIO()
     w = csv.writer(out)
     w.writerow(["date", "type", "category", "amount", "note"])
-    for r in Tx.query.filter_by(family_id=g.f.id).order_by(Tx.date):
-        w.writerow([r.date, r.kind, r.category, r.amount, r.note])
+    for r in approved_tx().order_by(Tx.date):
+        w.writerow([r.date, r.kind, csv_cell(r.category), r.amount, csv_cell(r.note)])
     return Response(out.getvalue(), mimetype="text/csv")
 
 
@@ -1147,9 +1316,9 @@ def export():
 @fam
 def bills():
     if request.method == "POST":
-        if not g.u.is_owner:
-            return err("Only the family owner can manage bills", 403)
-        d = request.get_json() or {}
+        if not can_manage_finances():
+            return err("Only a Parent or the family owner can manage bills", 403)
+        d = body()
         try:
             amt = num(d.get("amount"))
             due = pdate(d.get("due"))
@@ -1172,8 +1341,8 @@ def bills():
 @fam
 def bill_detail(i):
     bill = Bill.query.filter_by(id=i, family_id=g.f.id).first_or_404()
-    if request.method != "GET" and not g.u.is_owner:
-        return err("Only the family owner can manage bills", 403)
+    if request.method != "GET" and not can_manage_finances():
+        return err("Only a Parent or the family owner can manage bills", 403)
     if bill.paid:
         return err("Paid bills can no longer be changed", 409)
     if request.method == "DELETE":
@@ -1181,7 +1350,7 @@ def bill_detail(i):
         db.session.commit()
         return jsonify(ok=1)
     if request.method == "PUT":
-        d = request.get_json() or {}
+        d = body()
         name = d.get("name") if isinstance(d.get("name"), str) else ""
         if not name.strip():
             return err("Bill name required")
@@ -1198,8 +1367,8 @@ def bill_detail(i):
 @app.post("/api/bills/<int:i>/pay")
 @fam
 def pay(i):
-    if not g.u.is_owner:
-        return err("Only the family owner can mark bills as paid", 403)
+    if not can_manage_finances():
+        return err("Only a Parent or the family owner can mark bills as paid", 403)
     b = Bill.query.filter_by(id=i, family_id=g.f.id).first_or_404()
     if b.paid:
         return err("This bill has already been paid", 409)
@@ -1214,16 +1383,17 @@ def pay(i):
 @fam
 def goals():
     if request.method == "POST":
-        if not g.u.is_owner:
-            return err("Only the family owner can create savings goals", 403)
-        d = request.get_json() or {}
+        if not can_manage_finances():
+            return err("Only a Parent or the family owner can create savings goals", 403)
+        d = body()
         try:
             tgt = num(d.get("target"))
         except ValueError as e:
             return err(str(e))
-        if not d.get("name"):
+        name = d.get("name") if isinstance(d.get("name"), str) else ""
+        if not name.strip():
             return err("Goal name required")
-        db.session.add(Goal(family_id=g.f.id, name=d["name"], target=tgt, saved=0))
+        db.session.add(Goal(family_id=g.f.id, name=name.strip()[:120], target=tgt, saved=0))
         db.session.commit()
         return jsonify(ok=1)
     return jsonify([{"id": x.id, "name": x.name, "target": x.target, "saved": x.saved}
@@ -1235,7 +1405,7 @@ def goals():
 def goal_add(i):
     x = Goal.query.filter_by(id=i, family_id=g.f.id).first_or_404()
     try:
-        x.saved += num((request.get_json() or {}).get("amount"))
+        x.saved += num(body().get("amount"))
     except ValueError as e:
         return err(str(e))
     db.session.commit()
@@ -1246,9 +1416,9 @@ def goal_add(i):
 @fam
 def budgets():
     if request.method == "POST":
-        if not g.u.is_owner:
-            return err("Only the family owner can manage budgets", 403)
-        d = request.get_json() or {}
+        if not can_manage_finances():
+            return err("Only a Parent or the family owner can manage budgets", 403)
+        d = body()
         category = d.get("category") if isinstance(d.get("category"), str) else ""
         if not category.strip() or len(category.strip()) > 60:
             return err("Enter a valid budget category")
@@ -1259,17 +1429,17 @@ def budgets():
         budget = Budget.query.filter_by(family_id=g.f.id, category=category.strip()).first()
         if budget:
             budget.monthly_limit = monthly_limit
+        elif not premium() and Budget.query.filter_by(family_id=g.f.id).count() >= FREE_BUDGETS:
+            return err(f"The Free plan includes {FREE_BUDGETS} budgets. Upgrade to Premium for unlimited budgets.", 403)
         else:
             budget = Budget(family_id=g.f.id, category=category.strip(), monthly_limit=monthly_limit)
             db.session.add(budget)
         db.session.commit()
         return jsonify(ok=1, id=budget.id)
     t = app_today()
-    spent_rows = Tx.query.filter_by(family_id=g.f.id, kind="expense").all()
     spent = {}
-    for row in spent_rows:
-        if row.date.year == t.year and row.date.month == t.month:
-            spent[row.category] = spent.get(row.category, 0) + row.amount
+    for row in approved_tx().filter(Tx.kind == "expense", Tx.date >= t.replace(day=1), Tx.date <= t):
+        spent[row.category] = spent.get(row.category, 0) + row.amount
     return jsonify([{"id": b.id, "category": b.category, "monthly_limit": b.monthly_limit,
                      "spent": spent.get(b.category, 0)}
                     for b in Budget.query.filter_by(family_id=g.f.id).order_by(Budget.category)])
@@ -1278,14 +1448,14 @@ def budgets():
 @app.route("/api/budgets/<int:i>", methods=["PUT", "DELETE"])
 @fam
 def budget_detail(i):
-    if not g.u.is_owner:
-        return err("Only the family owner can manage budgets", 403)
+    if not can_manage_finances():
+        return err("Only a Parent or the family owner can manage budgets", 403)
     budget = Budget.query.filter_by(id=i, family_id=g.f.id).first_or_404()
     if request.method == "DELETE":
         db.session.delete(budget)
         db.session.commit()
         return jsonify(ok=1)
-    d = request.get_json() or {}
+    d = body()
     category = d.get("category") if isinstance(d.get("category"), str) else ""
     if not category.strip() or len(category.strip()) > 60:
         return err("Enter a valid budget category")
